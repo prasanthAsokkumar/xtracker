@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(curl -s \"https://xtracker.polymarket.com/api/users/elonmusk?platform=X\")",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }

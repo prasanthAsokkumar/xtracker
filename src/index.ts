@@ -7,6 +7,13 @@ import {
   getTrackingWithStats,
   type TrackingWithStats,
 } from './xtrackerClient';
+import {
+  startPresenceMonitor,
+  subscribe,
+  unsubscribe,
+  isSubscribed,
+  getStatus,
+} from './presenceAlert';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TRACKED_HANDLE = process.env.TRACKED_HANDLE ?? 'elonmusk';
@@ -31,14 +38,14 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 bot.onText(/^\/start$/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    `xtracker bot online.\nTracking: @${TRACKED_HANDLE}\n\nCommands:\n/latest - latest tweet count\n/count - total tweet count\n/user - full user info\n/monitor <keyword> - monitor an event\n/unmonitor <keyword> - stop monitoring\n/help - show this message`
+    `xtracker bot online.\nTracking: @${TRACKED_HANDLE}\n\nCommands:\n/latest - latest tweet count\n/count - total tweet count\n/user - full user info\n/monitor <keyword> - monitor an event\n/unmonitor <keyword> - stop monitoring\n/alertme - subscribe to online/offline alerts\n/stopalert - unsubscribe from alerts\n/alertstatus - current activity status\n/help - show this message`
   );
 });
 
 bot.onText(/^\/help$/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    'Commands:\n/latest - latest tweet count + active market stats\n/count - total tweet count for tracked user\n/markets - per-market tweet counts (active tracking periods)\n/user - full user info\n/count <handle> - count for a specific handle\n/monitor <keyword> - start monitoring an event tracking by keyword\n/monitor - list active monitors\n/unmonitor <keyword> - stop monitoring an event'
+    'Commands:\n/latest - latest tweet count + active market stats\n/count - total tweet count for tracked user\n/markets - per-market tweet counts (active tracking periods)\n/user - full user info\n/count <handle> - count for a specific handle\n/monitor <keyword> - start monitoring an event tracking by keyword\n/monitor - list active monitors\n/unmonitor <keyword> - stop monitoring an event\n/alertme - subscribe to online/offline activity alerts\n/stopalert - unsubscribe from activity alerts\n/alertstatus - show current activity status'
   );
 });
 
@@ -197,8 +204,50 @@ bot.onText(/^\/unmonitor(?:\s+(.+))?$/, async (msg, match) => {
   bot.sendMessage(chatId, `Monitoring stopped for "${entry.title}".`);
 });
 
+bot.onText(/^\/alertme$/, (msg) => {
+  const chatId = msg.chat.id;
+  if (!subscribe(chatId)) {
+    bot.sendMessage(chatId, 'You are already subscribed to presence alerts.');
+    return;
+  }
+  const { status, lastCount } = getStatus();
+  const statusLine =
+    status === 'unknown'
+      ? 'Status not yet known (will update on next poll).'
+      : status === 'active'
+        ? `Currently active. Last known count: ${lastCount?.toLocaleString()}`
+        : `Currently inactive. Last known count: ${lastCount?.toLocaleString()}`;
+  bot.sendMessage(
+    chatId,
+    `✅ Subscribed to @${TRACKED_HANDLE} presence alerts.\n${statusLine}\n\nYou will be notified when they go active or inactive.\nUse /stopalert to unsubscribe.`
+  );
+});
+
+bot.onText(/^\/stopalert$/, (msg) => {
+  const chatId = msg.chat.id;
+  if (!unsubscribe(chatId)) {
+    bot.sendMessage(chatId, 'You are not subscribed to presence alerts.');
+    return;
+  }
+  bot.sendMessage(chatId, `🔕 Unsubscribed from @${TRACKED_HANDLE} presence alerts.`);
+});
+
+bot.onText(/^\/alertstatus$/, (msg) => {
+  const { status, lastCount, lastActivityAt } = getStatus();
+  const icon = status === 'active' ? '🟢' : status === 'inactive' ? '🔴' : '⚪';
+  const lastSeen = lastActivityAt
+    ? `Last activity: ${new Date(lastActivityAt).toUTCString()}`
+    : 'No activity detected yet.';
+  const subscribed = isSubscribed(msg.chat.id) ? 'Subscribed ✅' : 'Not subscribed (use /alertme)';
+  bot.sendMessage(
+    msg.chat.id,
+    `${icon} @${TRACKED_HANDLE} status: ${status}\nLast count: ${lastCount?.toLocaleString() ?? 'unknown'}\n${lastSeen}\n${subscribed}`
+  );
+});
+
 bot.on('polling_error', (err) => {
   console.error('[polling_error]', err.message);
 });
 
+startPresenceMonitor(bot, TRACKED_HANDLE);
 console.log(`xtracker bot started. Tracking @${TRACKED_HANDLE}`);
