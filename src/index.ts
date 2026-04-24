@@ -4,11 +4,23 @@ import {
   getTweetCount,
   getUser,
   getAllTrackingsWithStats,
+  getTrackingWithStats,
   type TrackingWithStats,
 } from './xtrackerClient';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TRACKED_HANDLE = process.env.TRACKED_HANDLE ?? 'elonmusk';
+const MONITOR_INTERVAL_MS = parseInt(process.env.MONITOR_INTERVAL_MS ?? '120000', 10);
+
+interface MonitorEntry {
+  timer: NodeJS.Timeout;
+  trackingId: string;
+  title: string;
+  lastCount: number;
+}
+
+// key: `${chatId}:${trackingId}`
+const monitors = new Map<string, MonitorEntry>();
 
 if (!TOKEN) {
   throw new Error('TELEGRAM_BOT_TOKEN is missing. Add it to .env');
@@ -19,14 +31,14 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 bot.onText(/^\/start$/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    `xtracker bot online.\nTracking: @${TRACKED_HANDLE}\n\nCommands:\n/latest - latest tweet count\n/count - total tweet count\n/user - full user info\n/help - show this message`
+    `xtracker bot online.\nTracking: @${TRACKED_HANDLE}\n\nCommands:\n/latest - latest tweet count\n/count - total tweet count\n/user - full user info\n/monitor <keyword> - monitor an event\n/unmonitor <keyword> - stop monitoring\n/help - show this message`
   );
 });
 
 bot.onText(/^\/help$/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    'Commands:\n/latest - latest tweet count + active market stats\n/count - total tweet count for tracked user\n/markets - per-market tweet counts (active tracking periods)\n/user - full user info\n/count <handle> - count for a specific handle'
+    'Commands:\n/latest - latest tweet count + active market stats\n/count - total tweet count for tracked user\n/markets - per-market tweet counts (active tracking periods)\n/user - full user info\n/count <handle> - count for a specific handle\n/monitor <keyword> - start monitoring an event tracking by keyword\n/monitor - list active monitors\n/unmonitor <keyword> - stop monitoring an event'
   );
 });
 
@@ -93,6 +105,96 @@ bot.onText(/^\/latest$/, async (msg) => {
     const message = err instanceof Error ? err.message : String(err);
     bot.sendMessage(msg.chat.id, `Failed to fetch latest: ${message}`);
   }
+});
+
+bot.onText(/^\/monitor(?:\s+(.+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const keyword = match?.[1]?.trim().toLowerCase();
+
+  if (!keyword) {
+    const active = [...monitors.entries()]
+      .filter(([key]) => key.startsWith(`${chatId}:`))
+      .map(([, entry]) => `• ${entry.title} (last count: ${entry.lastCount})`);
+    bot.sendMessage(
+      chatId,
+      active.length
+        ? `Active monitors:\n\n${active.join('\n')}`
+        : 'No active monitors. Use /monitor <keyword> to start one.'
+    );
+    return;
+  }
+
+  try {
+    const trackings = await getAllTrackingsWithStats(TRACKED_HANDLE);
+    const match2 = trackings.find((t) => t.title.toLowerCase().includes(keyword));
+    if (!match2) {
+      bot.sendMessage(chatId, `No active tracking found matching "${keyword}".`);
+      return;
+    }
+
+    const key = `${chatId}:${match2.id}`;
+    if (monitors.has(key)) {
+      bot.sendMessage(chatId, `Already monitoring "${match2.title}".`);
+      return;
+    }
+
+    const timer = setInterval(async () => {
+      const entry = monitors.get(key);
+      if (!entry) return;
+      try {
+        const updated = await getTrackingWithStats(entry.trackingId);
+        if (updated.stats.total !== entry.lastCount) {
+          const prev = entry.lastCount;
+          entry.lastCount = updated.stats.total;
+          bot.sendMessage(
+            chatId,
+            `📊 ${entry.title}\nTweet count updated: ${prev.toLocaleString()} → ${updated.stats.total.toLocaleString()} (${updated.stats.percentComplete}% complete)`
+          );
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[monitor] ${key}: ${message}`);
+      }
+    }, MONITOR_INTERVAL_MS);
+
+    monitors.set(key, {
+      timer,
+      trackingId: match2.id,
+      title: match2.title,
+      lastCount: match2.stats.total,
+    });
+
+    bot.sendMessage(
+      chatId,
+      `Monitoring started for "${match2.title}".\nCurrent count: ${match2.stats.total.toLocaleString()} posts (${match2.stats.percentComplete}%)\nChecking every ${Math.round(MONITOR_INTERVAL_MS / 60000)} min.`
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    bot.sendMessage(chatId, `Failed to start monitor: ${message}`);
+  }
+});
+
+bot.onText(/^\/unmonitor(?:\s+(.+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const keyword = match?.[1]?.trim().toLowerCase();
+
+  const chatMonitors = [...monitors.entries()].filter(([key]) => key.startsWith(`${chatId}:`));
+
+  if (!keyword) {
+    bot.sendMessage(chatId, 'Usage: /unmonitor <keyword>');
+    return;
+  }
+
+  const found = chatMonitors.find(([, entry]) => entry.title.toLowerCase().includes(keyword));
+  if (!found) {
+    bot.sendMessage(chatId, `No active monitor matching "${keyword}".`);
+    return;
+  }
+
+  const [key, entry] = found;
+  clearInterval(entry.timer);
+  monitors.delete(key);
+  bot.sendMessage(chatId, `Monitoring stopped for "${entry.title}".`);
 });
 
 bot.on('polling_error', (err) => {
